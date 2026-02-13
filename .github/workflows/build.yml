@@ -6,6 +6,10 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+  packages: write
+
 jobs:
   build:
     name: Build Debian ${{ matrix.debian }} - ${{ matrix.arch }}
@@ -127,22 +131,17 @@ jobs:
 
       - name: Build Debian rootfs
         run: |
-   
           ARCH="${{ matrix.arch }}"
-   
           if [[ "$ARCH" == "armv7l" ]]; then
             ARCH="armhf"
           fi
-      
           MIRROR="http://deb.debian.org/debian"
-    
           if [[ "${{ matrix.debian }}" == "stretch" ]] || [[ "${{ matrix.debian }}" == "buster" ]]; then
             MIRROR="http://archive.debian.org/debian"
           fi
           
           echo "Building Debian ${{ matrix.debian }} for ${{ matrix.arch }} (debootstrap arch: $ARCH)"
           echo "Using mirror: $MIRROR"
-
           if [[ "${{ matrix.debian }}" == "stretch" ]] || [[ "${{ matrix.debian }}" == "buster" ]]; then
             sudo debootstrap \
               --arch=$ARCH \
@@ -165,17 +164,14 @@ jobs:
       - name: Configure rootfs
         run: |
           ROOTFS="build/${{ matrix.debian }}-${{ matrix.arch }}"
-   
           sudo chroot $ROOTFS /bin/bash -c "echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen"
           sudo chroot $ROOTFS /bin/bash -c "locale-gen" || true
-
           sudo tee $ROOTFS/etc/build-info.txt > /dev/null <<EOF
           Debian Version: ${{ matrix.debian }}
           Architecture: ${{ matrix.arch }}
           Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
           Built by: GitHub Actions
           EOF
-
           sudo chroot $ROOTFS /bin/bash -c "apt-get clean" || true
           sudo rm -rf $ROOTFS/var/cache/apt/archives/*.deb
           sudo rm -rf $ROOTFS/tmp/*
@@ -184,11 +180,9 @@ jobs:
       - name: Create tarball
         run: |
           cd build/${{ matrix.debian }}-${{ matrix.arch }}
-
           sudo tar czf ../../artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz .
           
           cd ../..
-
           sha256sum artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz > \
             artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz.sha256
 
