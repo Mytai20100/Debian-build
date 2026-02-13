@@ -142,11 +142,14 @@ jobs:
           
           echo "Building Debian ${{ matrix.debian }} for ${{ matrix.arch }} (debootstrap arch: $ARCH)"
           echo "Using mirror: $MIRROR"
+          
+          # Stage 1: Bootstrap with --foreign for cross-arch
           if [[ "${{ matrix.debian }}" == "stretch" ]] || [[ "${{ matrix.debian }}" == "buster" ]]; then
             sudo debootstrap \
               --arch=$ARCH \
               --variant=minbase \
               --include=ca-certificates,locales \
+              --foreign \
               --no-check-gpg \
               ${{ matrix.debian }} \
               build/${{ matrix.debian }}-${{ matrix.arch }} \
@@ -156,49 +159,92 @@ jobs:
               --arch=$ARCH \
               --variant=minbase \
               --include=ca-certificates,locales \
+              --foreign \
               ${{ matrix.debian }} \
               build/${{ matrix.debian }}-${{ matrix.arch }} \
               $MIRROR
           fi
-
+          
+          ROOTFS="build/${{ matrix.debian }}-${{ matrix.arch }}"
+          
+          # Copy QEMU static binary for second stage
+          if [[ "$ARCH" == "armhf" ]] || [[ "$ARCH" == "armel" ]]; then
+            sudo cp /usr/bin/qemu-arm-static $ROOTFS/usr/bin/
+          elif [[ "$ARCH" == "arm64" ]]; then
+            sudo cp /usr/bin/qemu-aarch64-static $ROOTFS/usr/bin/
+          elif [[ "$ARCH" == "i386" ]]; then
+            sudo cp /usr/bin/qemu-i386-static $ROOTFS/usr/bin/ || true
+          fi
+          
+          # Stage 2: Complete the bootstrap inside chroot
+          echo "Running second stage..."
+          sudo chroot $ROOTFS /debootstrap/debootstrap --second-stage
+          
       - name: Configure rootfs
         run: |
           ROOTFS="build/${{ matrix.debian }}-${{ matrix.arch }}"
-          sudo chroot $ROOTFS /bin/bash -c "echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen"
+          
+          # Setup DNS
+          echo "Setting up DNS..."
+          sudo tee $ROOTFS/etc/resolv.conf > /dev/null <<EOF
+          nameserver 8.8.8.8
+          nameserver 8.8.4.4
+          nameserver 1.1.1.1
+          EOF
+          
+          # Setup APT sources
+          echo "Setting up APT sources..."
+          MIRROR="http://deb.debian.org/debian"
+          if [[ "${{ matrix.debian }}" == "stretch" ]] || [[ "${{ matrix.debian }}" == "buster" ]]; then
+            MIRROR="http://archive.debian.org/debian"
+            sudo tee $ROOTFS/etc/apt/sources.list > /dev/null <<EOF
+          deb $MIRROR ${{ matrix.debian }} main contrib non-free
+          EOF
+          else
+            sudo tee $ROOTFS/etc/apt/sources.list > /dev/null <<EOF
+          deb $MIRROR ${{ matrix.debian }} main contrib non-free non-free-firmware
+          deb $MIRROR ${{ matrix.debian }}-updates main contrib non-free non-free-firmware
+          deb http://security.debian.org/debian-security ${{ matrix.debian }}-security main contrib non-free non-free-firmware
+          EOF
+          fi
+          
+          # Configure locales
+          sudo chroot $ROOTFS /bin/bash -c "echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen" || true
           sudo chroot $ROOTFS /bin/bash -c "locale-gen" || true
+          
+          # Add build info
           sudo tee $ROOTFS/etc/build-info.txt > /dev/null <<EOF
           Debian Version: ${{ matrix.debian }}
           Architecture: ${{ matrix.arch }}
           Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
           Built by: GitHub Actions
+          Mirror: $MIRROR
           EOF
+          
+          # Cleanup
           sudo chroot $ROOTFS /bin/bash -c "apt-get clean" || true
           sudo rm -rf $ROOTFS/var/cache/apt/archives/*.deb
           sudo rm -rf $ROOTFS/tmp/*
           sudo rm -rf $ROOTFS/var/tmp/*
+          
+          # Remove QEMU static binary
+          sudo rm -f $ROOTFS/usr/bin/qemu-*-static
 
       - name: Create tarball
         run: |
           cd build/${{ matrix.debian }}-${{ matrix.arch }}
           sudo tar czf ../../artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz .
-          
-          cd ../..
-          sha256sum artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz > \
-            artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz.sha256
 
       - name: Get tarball info
         run: |
           ls -lh artifacts/
-          echo "=== SHA256 Checksum ==="
-          cat artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz.sha256
+          echo "Tarball created successfully"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: debian-${{ matrix.debian }}-${{ matrix.arch }}
-          path: |
-            artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz
-            artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz.sha256
+          path: artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz
           retention-days: 30
 
   create-release:
@@ -216,7 +262,7 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
-          find all-artifacts -name "*.tar.gz*" -exec cp {} release-assets/ \;
+          find all-artifacts -name "*.tar.gz" -exec cp {} release-assets/ \;
           ls -lh release-assets/
 
       - name: Create Release
@@ -225,7 +271,7 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: Debian Builds - Run ${{ github.run_number }}
           body: |
-            # Debian 
+            # Debian Rootfs Builds
             
             ---
             
@@ -243,16 +289,28 @@ jobs:
             ### Architectures
             `amd64` `i386` `arm64` `armhf` `armel` `armv7l`
             
+            ### Features
+            - ✅ Fully bootstrapped with debootstrap second-stage
+            - ✅ Pre-configured DNS (Google & Cloudflare)
+            - ✅ APT sources ready to use
+            - ✅ Locales configured (en_US.UTF-8)
+            - ✅ Ready for chroot/container use
+            
             ### Quick Start
             ```bash
             # Download
-            wget debian-bookworm-arm64.tar.gz
+            wget https://github.com/YOUR-REPO/releases/download/TAG/debian-bookworm-arm64.tar.gz
             
             # Extract
             mkdir rootfs && tar xzf debian-bookworm-arm64.tar.gz -C rootfs
             
-            # Use it
+            # Use it (with QEMU for cross-arch)
             sudo chroot rootfs /bin/bash
+            
+            # Test basic commands
+            ls /usr/bin
+            apt update
+            dpkg --version
             ```
             
             ---
@@ -271,16 +329,28 @@ jobs:
             ### Kiến Trúc
             `amd64` `i386` `arm64` `armhf` `armel` `armv7l`
             
+            ### Tính Năng
+            - ✅ Bootstrap hoàn chỉnh với debootstrap second-stage
+            - ✅ DNS đã cấu hình sẵn (Google & Cloudflare)
+            - ✅ APT sources sẵn sàng sử dụng
+            - ✅ Locales đã cài đặt (en_US.UTF-8)
+            - ✅ Sẵn sàng cho chroot/container
+            
             ### Hướng Dẫn Nhanh
             ```bash
             # Tải về
-            wget debian-bookworm-arm64.tar.gz
+            wget https://github.com/YOUR-REPO/releases/download/TAG/debian-bookworm-arm64.tar.gz
             
             # Giải nén
             mkdir rootfs && tar xzf debian-bookworm-arm64.tar.gz -C rootfs
             
-            # Sử dụng
+            # Sử dụng (với QEMU cho cross-arch)
             sudo chroot rootfs /bin/bash
+            
+            # Kiểm tra lệnh cơ bản
+            ls /usr/bin
+            apt update
+            dpkg --version
             ```
             
             ---
@@ -293,6 +363,11 @@ jobs:
             - Debian 11-15: `amd64` `i386` `arm64` `armhf` `armv7l` (5 archs)
             
             **Note:** `armel` only available for Debian 9-10 (archived versions)
+            
+            **Important:** For ARM architectures, you need QEMU user emulation:
+            ```bash
+            sudo apt-get install qemu-user-static
+            ```
           files: release-assets/*
           draft: false
           prerelease: false
