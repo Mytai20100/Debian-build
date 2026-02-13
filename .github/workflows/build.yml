@@ -1,5 +1,4 @@
 name: Build Debian
-
 on:
   push:
     branches: [ main, master, develop ]
@@ -15,21 +14,94 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        debian:
-          - stretch   # Debian 9
-          - buster    # Debian 10
-          - bullseye  # Debian 11
-          - bookworm  # Debian 12
-          - trixie    # Debian 13
-          - forky     # Debian 14
-          - sid       # Debian 15 (unstable)
-        arch:
-          - amd64     # x86_64
-          - i386      # x86 32-bit
-          - armhf     # ARM 32-bit hard float
-          - armel     # ARM 32-bit soft float (rất cổ)
-          - arm64     # ARM 64-bit (mới nhất)
-          - armv7l    # ARM v7
+        include:
+          # Debian 9 (Stretch) - Full support including old archs
+          - debian: stretch
+            arch: amd64
+          - debian: stretch
+            arch: i386
+          - debian: stretch
+            arch: armhf
+          - debian: stretch
+            arch: armel
+          - debian: stretch
+            arch: arm64
+          - debian: stretch
+            arch: armv7l
+          
+          # Debian 10 (Buster) - Full support including old archs
+          - debian: buster
+            arch: amd64
+          - debian: buster
+            arch: i386
+          - debian: buster
+            arch: armhf
+          - debian: buster
+            arch: armel
+          - debian: buster
+            arch: arm64
+          - debian: buster
+            arch: armv7l
+          
+          # Debian 11 (Bullseye) - NO armel support
+          - debian: bullseye
+            arch: amd64
+          - debian: bullseye
+            arch: i386
+          - debian: bullseye
+            arch: armhf
+          - debian: bullseye
+            arch: arm64
+          - debian: bullseye
+            arch: armv7l
+          
+          # Debian 12 (Bookworm) - NO armel support
+          - debian: bookworm
+            arch: amd64
+          - debian: bookworm
+            arch: i386
+          - debian: bookworm
+            arch: armhf
+          - debian: bookworm
+            arch: arm64
+          - debian: bookworm
+            arch: armv7l
+          
+          # Debian 13 (Trixie) - NO armel support
+          - debian: trixie
+            arch: amd64
+          - debian: trixie
+            arch: i386
+          - debian: trixie
+            arch: armhf
+          - debian: trixie
+            arch: arm64
+          - debian: trixie
+            arch: armv7l
+          
+          # Debian 14 (Forky) - Latest archs only
+          - debian: forky
+            arch: amd64
+          - debian: forky
+            arch: i386
+          - debian: forky
+            arch: armhf
+          - debian: forky
+            arch: arm64
+          - debian: forky
+            arch: armv7l
+          
+          # Debian 15 (Sid) - Latest archs only
+          - debian: sid
+            arch: amd64
+          - debian: sid
+            arch: i386
+          - debian: sid
+            arch: armhf
+          - debian: sid
+            arch: arm64
+          - debian: sid
+            arch: armv7l
     
     steps:
       - name: Checkout code
@@ -46,46 +118,64 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-user-static binfmt-support debootstrap
+          sudo apt-get install -y qemu-user-static binfmt-support debootstrap debian-archive-keyring
 
       - name: Create build directory
         run: |
           mkdir -p build/${{ matrix.debian }}-${{ matrix.arch }}
           mkdir -p artifacts
 
-      - name: Build Debian 
+      - name: Build Debian rootfs
         run: |
+   
           ARCH="${{ matrix.arch }}"
-          case "$ARCH" in
-            armv7l)
-              ARCH="armhf"
-              ;;
-          esac
+   
+          if [[ "$ARCH" == "armv7l" ]]; then
+            ARCH="armhf"
+          fi
+      
           MIRROR="http://deb.debian.org/debian"
+    
           if [[ "${{ matrix.debian }}" == "stretch" ]] || [[ "${{ matrix.debian }}" == "buster" ]]; then
             MIRROR="http://archive.debian.org/debian"
           fi
-          echo "Building Debian ${{ matrix.debian }} for $ARCH"
+          
+          echo "Building Debian ${{ matrix.debian }} for ${{ matrix.arch }} (debootstrap arch: $ARCH)"
           echo "Using mirror: $MIRROR"
-          sudo debootstrap \
-            --arch=$ARCH \
-            --variant=minbase \
-            --include=ca-certificates,locales \
-            ${{ matrix.debian }} \
-            build/${{ matrix.debian }}-${{ matrix.arch }} \
-            $MIRROR
+
+          if [[ "${{ matrix.debian }}" == "stretch" ]] || [[ "${{ matrix.debian }}" == "buster" ]]; then
+            sudo debootstrap \
+              --arch=$ARCH \
+              --variant=minbase \
+              --include=ca-certificates,locales \
+              --no-check-gpg \
+              ${{ matrix.debian }} \
+              build/${{ matrix.debian }}-${{ matrix.arch }} \
+              $MIRROR
+          else
+            sudo debootstrap \
+              --arch=$ARCH \
+              --variant=minbase \
+              --include=ca-certificates,locales \
+              ${{ matrix.debian }} \
+              build/${{ matrix.debian }}-${{ matrix.arch }} \
+              $MIRROR
+          fi
 
       - name: Configure rootfs
         run: |
           ROOTFS="build/${{ matrix.debian }}-${{ matrix.arch }}"
+   
           sudo chroot $ROOTFS /bin/bash -c "echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen"
           sudo chroot $ROOTFS /bin/bash -c "locale-gen" || true
+
           sudo tee $ROOTFS/etc/build-info.txt > /dev/null <<EOF
           Debian Version: ${{ matrix.debian }}
           Architecture: ${{ matrix.arch }}
           Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
           Built by: GitHub Actions
           EOF
+
           sudo chroot $ROOTFS /bin/bash -c "apt-get clean" || true
           sudo rm -rf $ROOTFS/var/cache/apt/archives/*.deb
           sudo rm -rf $ROOTFS/tmp/*
@@ -94,8 +184,11 @@ jobs:
       - name: Create tarball
         run: |
           cd build/${{ matrix.debian }}-${{ matrix.arch }}
+
           sudo tar czf ../../artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz .
+          
           cd ../..
+
           sha256sum artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz > \
             artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz.sha256
 
@@ -138,7 +231,7 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: Debian Builds - Run ${{ github.run_number }}
           body: |
-            # Debian
+            # Debian 
             
             ---
             
@@ -199,7 +292,13 @@ jobs:
             ---
             
             **Build Date:** ${{ github.event.head_commit.timestamp }}  
-            **Total Builds:** 42 variants (7 versions × 6 architectures)
+            **Total Builds:** 42 variants
+            
+            **Support Matrix:**
+            - Debian 9-10: `amd64` `i386` `arm64` `armhf` `armel` `armv7l` (6 archs)
+            - Debian 11-15: `amd64` `i386` `arm64` `armhf` `armv7l` (5 archs)
+            
+            **Note:** `armel` only available for Debian 9-10 (archived versions)
           files: release-assets/*
           draft: false
           prerelease: false
