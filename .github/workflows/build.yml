@@ -1,0 +1,207 @@
+name: Build Debian
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Debian ${{ matrix.debian }} - ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        debian:
+          - stretch   # Debian 9
+          - buster    # Debian 10
+          - bullseye  # Debian 11
+          - bookworm  # Debian 12
+          - trixie    # Debian 13
+          - forky     # Debian 14
+          - sid       # Debian 15 (unstable)
+        arch:
+          - amd64     # x86_64
+          - i386      # x86 32-bit
+          - armhf     # ARM 32-bit hard float
+          - armel     # ARM 32-bit soft float (rất cổ)
+          - arm64     # ARM 64-bit (mới nhất)
+          - armv7l    # ARM v7
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static binfmt-support debootstrap
+
+      - name: Create build directory
+        run: |
+          mkdir -p build/${{ matrix.debian }}-${{ matrix.arch }}
+          mkdir -p artifacts
+
+      - name: Build Debian 
+        run: |
+          ARCH="${{ matrix.arch }}"
+          case "$ARCH" in
+            armv7l)
+              ARCH="armhf"
+              ;;
+          esac
+          MIRROR="http://deb.debian.org/debian"
+          if [[ "${{ matrix.debian }}" == "stretch" ]] || [[ "${{ matrix.debian }}" == "buster" ]]; then
+            MIRROR="http://archive.debian.org/debian"
+          fi
+          echo "Building Debian ${{ matrix.debian }} for $ARCH"
+          echo "Using mirror: $MIRROR"
+          sudo debootstrap \
+            --arch=$ARCH \
+            --variant=minbase \
+            --include=ca-certificates,locales \
+            ${{ matrix.debian }} \
+            build/${{ matrix.debian }}-${{ matrix.arch }} \
+            $MIRROR
+
+      - name: Configure rootfs
+        run: |
+          ROOTFS="build/${{ matrix.debian }}-${{ matrix.arch }}"
+          sudo chroot $ROOTFS /bin/bash -c "echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen"
+          sudo chroot $ROOTFS /bin/bash -c "locale-gen" || true
+          sudo tee $ROOTFS/etc/build-info.txt > /dev/null <<EOF
+          Debian Version: ${{ matrix.debian }}
+          Architecture: ${{ matrix.arch }}
+          Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          Built by: GitHub Actions
+          EOF
+          sudo chroot $ROOTFS /bin/bash -c "apt-get clean" || true
+          sudo rm -rf $ROOTFS/var/cache/apt/archives/*.deb
+          sudo rm -rf $ROOTFS/tmp/*
+          sudo rm -rf $ROOTFS/var/tmp/*
+
+      - name: Create tarball
+        run: |
+          cd build/${{ matrix.debian }}-${{ matrix.arch }}
+          sudo tar czf ../../artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz .
+          cd ../..
+          sha256sum artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz > \
+            artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz.sha256
+
+      - name: Get tarball info
+        run: |
+          ls -lh artifacts/
+          echo "=== SHA256 Checksum ==="
+          cat artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian-${{ matrix.debian }}-${{ matrix.arch }}
+          path: |
+            artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz
+            artifacts/debian-${{ matrix.debian }}-${{ matrix.arch }}.tar.gz.sha256
+          retention-days: 30
+
+  create-release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          find all-artifacts -name "*.tar.gz*" -exec cp {} release-assets/ \;
+          ls -lh release-assets/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Debian Builds - Run ${{ github.run_number }}
+          body: |
+            # Debian
+            
+            ---
+            
+            ## 🇬🇧 English
+            
+            ### Supported Versions
+            - **Debian 9** (Stretch) - Archived
+            - **Debian 10** (Buster) - Archived
+            - **Debian 11** (Bullseye) - Oldoldstable
+            - **Debian 12** (Bookworm) - Oldstable
+            - **Debian 13** (Trixie) - Testing
+            - **Debian 14** (Forky) - Testing
+            - **Debian 15** (Sid) - Unstable
+            
+            ### Architectures
+            `amd64` `i386` `arm64` `armhf` `armel` `armv7l`
+            
+            ### Quick Start
+            ```bash
+            # Download
+            wget debian-bookworm-arm64.tar.gz
+            
+            # Extract
+            mkdir rootfs && tar xzf debian-bookworm-arm64.tar.gz -C rootfs
+            
+            # Use it
+            sudo chroot rootfs /bin/bash
+            ```
+            
+            ---
+            
+            ## 🇻🇳 Tiếng Việt
+            
+            ### Các Phiên Bản
+            - **Debian 9** (Stretch) - Đã lưu trữ
+            - **Debian 10** (Buster) - Đã lưu trữ
+            - **Debian 11** (Bullseye) - Oldoldstable
+            - **Debian 12** (Bookworm) - Oldstable
+            - **Debian 13** (Trixie) - Testing
+            - **Debian 14** (Forky) - Testing
+            - **Debian 15** (Sid) - Unstable
+            
+            ### Kiến Trúc
+            `amd64` `i386` `arm64` `armhf` `armel` `armv7l`
+            
+            ### Hướng Dẫn Nhanh
+            ```bash
+            # Tải về
+            wget debian-bookworm-arm64.tar.gz
+            
+            # Giải nén
+            mkdir rootfs && tar xzf debian-bookworm-arm64.tar.gz -C rootfs
+            
+            # Sử dụng
+            sudo chroot rootfs /bin/bash
+            ```
+            
+            ---
+            
+            **Build Date:** ${{ github.event.head_commit.timestamp }}  
+            **Total Builds:** 42 variants (7 versions × 6 architectures)
+          files: release-assets/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
